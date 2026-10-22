@@ -74,7 +74,11 @@ function extend(psi::MPS, phis::Vector{MPS}; kwargs...)
       # Diagonalize projected density matrix PrhoP
       # to compute Bphi, which spans part of right basis 
       # of phis which is orthogonal to right basis of psi
-      D, Bphi = eigen(PrhoP; cutoff, ishermitian=true, righttags="bϕ_$j,Link")
+      # The cutoff must be absolute. tr(PrhoP) can be tiny, and a relative cutoff then
+      # keeps eigenvalues that are rounding noise (~1e-18). Their eigenvectors can lie
+      # inside the span of B, so [B; Bphi] is not orthonormal and the extended MPS is no
+      # longer psi (its norm or direction changes).
+      D, Bphi = eigen(PrhoP; cutoff, use_absolute_cutoff=true, ishermitian=true, righttags="bϕ_$j,Link")
 
       ## Test Bphi is ortho to B
       #O = Bphi*B

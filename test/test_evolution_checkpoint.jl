@@ -103,6 +103,23 @@ using ITensorMPS
         end
     end
 
+    # The gauge of the stored state must survive the resume: the evolution after it
+    # (in particular a basis extension) depends on where the orthogonality center is
+    @testset "resume keeps the orthogonality center" begin
+        mktempdir() do dir
+            filename = joinpath(dir, "checkpoint.hdf5")
+            run = new_run()
+            psi = orthogonalize(run.psi0, 3)
+            METTS.save_evolution_checkpoint(EvolutionCheckpoint(filename, params, run.sites), 1, psi, 0.0)
+
+            other = new_run()
+            checkpoint = EvolutionCheckpoint(filename, params, other.sites)
+            state = METTS.resume_checkpoint(METTS.checkpoint_tracker(checkpoint))
+            @test siteinds(state.psi) == other.sites
+            @test ITensorMPS.ortho_lims(state.psi) == 3:3
+        end
+    end
+
     @testset "refuses a checkpoint written with other params" begin
         mktempdir() do dir
             filename = joinpath(dir, "checkpoint.hdf5")

@@ -127,7 +127,12 @@ function resume_checkpoint(tracker::Union{Nothing,CheckpointTracker})
     isfile(checkpoint.filename) || return nothing
     state = h5open(checkpoint.filename, "r") do f
         check_checkpoint_params(checkpoint, read_params(f))
-        (psi=replace_siteinds(read(f, "psi", MPS), checkpoint.sites),
+        # replace_siteinds forgets the orthogonality center; without it the resumed
+        # evolution differs from an uninterrupted one
+        stored = read(f, "psi", MPS)
+        psi = replace_siteinds(stored, checkpoint.sites)
+        ITensorMPS.set_ortho_lims!(psi, ITensorMPS.ortho_lims(stored))
+        (psi=psi,
             step=read(f, "step"),
             log_norm=read(f, "log_norm"),
             max_step_seconds=read(f, "max_step_seconds"),
