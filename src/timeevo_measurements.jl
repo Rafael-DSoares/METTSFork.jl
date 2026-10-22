@@ -35,6 +35,10 @@ measurements   : Dict{String, Vector{Float64}} with same keys as returned by
                  the cumulative log norm at each measurement point
 collapsed_state: Vector{Int} from collapse_func applied to psi at t_collapse
 times          : Vector{Float64} of imaginary times at which measurements were taken
+
+With `checkpoint` set, the evolution can be stopped and resumed (see
+`EvolutionCheckpoint`); the measurements and the collapsed state taken so far are
+stored with the MPS.
 """
 function timeevo_tdvp_extend_measurements(
     H::MPO, psi0::MPS,
@@ -45,7 +49,7 @@ function timeevo_tdvp_extend_measurements(
     nsubdiv::Int64=4, kkrylov::Int64=3,
     normalize::Bool=true, silent=false,
     solver_backend::AbstractString="applyexp",
-    shift::Real=0.)
+    shift::Real=0., checkpoint::Union{Nothing,EvolutionCheckpoint}=nothing)
 
     @assert t_min < t_max "t_min must be strictly less than t_max"
     @assert tau0 <= tau "tau0 must be <= tau"
@@ -66,6 +70,8 @@ function timeevo_tdvp_extend_measurements(
     measurements = Dict{String, Vector{Float64}}()
     times_meas = Float64[]
 
+    collapsed_state = nothing
+
     function maybe_record!(psi, t)
         t_min-1e-8 <= t <= t_max+1e-8 || return
         result = measure(psi)
@@ -76,8 +82,24 @@ function timeevo_tdvp_extend_measurements(
         end
     end
 
+    # Steps are numbered over all phases: basis extension (1:nsubdiv), tau0 -> tau
+    # (nsubdiv + 1), segment 1 (up to nsubdiv + n_collapse) and segment 2, so that a resumed
+    # run skips exactly the steps contained in the checkpoint
+    tracker = checkpoint_tracker(checkpoint)
+    done = 0
+    state = resume_checkpoint(tracker)
+    if !isnothing(state)
+        psi, log_norm, done = state.psi, state.log_norm, state.step
+        append!(times_meas, state.times)
+        merge!(measurements, state.measurements)
+        collapsed_state = state.collapsed_state
+    end
+    save_step!(step) = checkpoint_step!(tracker, step, psi, log_norm;
+        times=times_meas, measurements=measurements, collapsed_state=collapsed_state)
+
     # --- Basis extension: 0 -> tau0 (nsubdiv logarithmically subdivided 1-site sweeps) ---
     for isub in 1:nsubdiv
+        isub <= done && continue
         l1 = maxlinkdim(psi)
         t_ext = @elapsed begin
             if !silent
@@ -105,11 +127,14 @@ function timeevo_tdvp_extend_measurements(
                 times_init[isub], entropy_von_neumann(psi, N ÷ 2), maxlinkdim(psi), t)
             flush(stdout)
         end
+        save_step!(isub)
     end
     GC.gc()
 
     # --- One 2-site sweep: tau0 -> tau  (skipped when tau0 == tau) ---
-    if tau0 < tau
+    if nsubdiv + 1 <= done
+        # contained in the checkpoint
+    elseif tau0 < tau
         step = tau - tau0
         t = @elapsed begin
             psi = tdvp(H, -step, psi;
@@ -126,13 +151,16 @@ function timeevo_tdvp_extend_measurements(
             flush(stdout)
         end
         GC.gc()
+        save_step!(nsubdiv + 1)
     else
         current_time = tau  # tau0 == tau
         maybe_record!(psi, current_time)
+        save_step!(nsubdiv + 1)
     end
 
     # --- Bulk segment 1: tau -> t_collapse  (n_collapse - 1 steps of tau) ---
     for step_idx in 2:n_collapse
+        nsubdiv + step_idx <= done && continue
         nsite = maxlinkdim(psi) < maxm ? 2 : 1
         t = @elapsed begin
             psi = tdvp(H, -tau, psi;
@@ -149,15 +177,20 @@ function timeevo_tdvp_extend_measurements(
             flush(stdout)
         end
         GC.gc()
+        save_step!(nsubdiv + step_idx)
     end
     # current_time == t_collapse
 
-    collapsed_state = collapse_func(psi)
+    # A resumed run past this point has the collapsed state from the checkpoint
+    if isnothing(collapsed_state)
+        collapsed_state = collapse_func(psi)
+    end
 
     # --- Bulk segment 2: t_collapse -> floor(t_max/tau)*tau ---
     if t_max > t_collapse
         n_extra = floor(Int, (t_max - t_collapse) / tau + 1e-10)
         for extra_idx in 1:n_extra
+            nsubdiv + n_collapse + extra_idx <= done && continue
             nsite = maxlinkdim(psi) < maxm ? 2 : 1
             t = @elapsed begin
                 psi = tdvp(H, -tau, psi;
@@ -174,6 +207,7 @@ function timeevo_tdvp_extend_measurements(
                 flush(stdout)
             end
             GC.gc()
+            save_step!(nsubdiv + n_collapse + extra_idx)
         end
     end
 

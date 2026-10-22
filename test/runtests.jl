@@ -5,4 +5,5 @@ using Test
     include("test_local_state.jl")
     include("test_random_product_state.jl")
     include("test_checkpoint.jl")
+    include("test_evolution_checkpoint.jl")
 end

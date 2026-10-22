@@ -11,8 +11,10 @@ export chained_bar, mbar_free_energies, mbar_reweight_observable, bootstrap_mbar
 export metts_single_temperature, metts_interval_temperatures
 export random_product_state, local_state_index, local_state_string, local_state_strings, local_state_integers
 export count_existing_steps, read_last_product_state
+export EvolutionCheckpoint, EvolutionInterrupted, read_checkpoint_params
 
 include("basis_extend.jl")
+include("evolution_checkpoint.jl")
 include("timeevo.jl")
 include("timeevo_measurements.jl")
 include("chained_bar.jl")

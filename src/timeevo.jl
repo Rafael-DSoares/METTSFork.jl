@@ -27,129 +27,72 @@ Basic time evolution using TDVP
 starting out with 2TDVP until a maximal bond dimension is achieved
 then it switches to 1TDVP
 a commensurate step size is automatically chosen
+
+With `checkpoint` set, the evolution can be stopped and resumed (see `EvolutionCheckpoint`).
 """
 function timeevo_tdvp(H::MPO, psi0::MPS, time::Number;
     tau::Number=0.1, cutoff::Float64=1e-6,
     maxm::Int64=1000, normalize::Bool=true,
     silent=false, solver_backend::AbstractString="applyexp",
-    shift::Real=0.)
-    N = length(psi0)
-    n_steps, remainder, time_tau = n_steps_remainder(time, tau)
-    psi = copy(psi0)
+    shift::Real=0., checkpoint::Union{Nothing,EvolutionCheckpoint}=nothing)
 
-    log_norm = 0.0
+    tracker = checkpoint_tracker(checkpoint)
+    state = resume_checkpoint(tracker)
+    if isnothing(state)
+        psi, log_norm, done = copy(psi0), 0.0, 0
+    else
+        psi, log_norm, done = state.psi, state.log_norm, state.step
+    end
+
+    return timeevo_tdvp_steps(H, psi, time, log_norm, 0, done, tracker;
+        tau=tau, cutoff=cutoff, maxm=maxm, silent=silent, solver_backend=solver_backend)
+end
+
+"""
+Steps of `timeevo_tdvp`, starting from `psi` with accumulated `log_norm`. The steps are
+numbered `offset + 1, offset + 2, ...` for checkpointing; those up to number `done` are
+skipped, because a resumed `psi` already contains them.
+"""
+function timeevo_tdvp_steps(H::MPO, psi::MPS, time::Number, log_norm::Real,
+    offset::Integer, done::Integer, tracker::Union{Nothing,CheckpointTracker};
+    tau::Number, cutoff::Float64, maxm::Int64, silent, solver_backend::AbstractString)
+    N = length(psi)
+    n_steps, remainder, time_tau = n_steps_remainder(time, tau)
+    n_steps = Int(n_steps)
+
+    # One sweep of size dt: 2TDVP until the maximal bond dimension is reached, then 1TDVP
+    function sweep(dt, tau_printed)
+        nsite = maxlinkdim(psi) < maxm ? 2 : 1
+        t = @elapsed begin
+            psi = tdvp(H, dt, psi;
+                updater_backend=solver_backend,
+                nsweeps=1,
+                nsite=nsite,
+                cutoff=cutoff,
+                maxdim=maxm,
+                normalize=false)
+
+            log_norm += 2.0*log(norm(psi))
+            normalize!(psi)
+        end
+        svn = entropy_von_neumann(psi, N ÷ 2)
+        linkdim = maxlinkdim(psi)
+        if !silent
+            @printf("    %dTDVP sweep, tau: %.5f, SvN: %.4f, maxm: %6d, time: %.5f secs\n",
+                nsite, tau_printed, svn, linkdim, t)
+            flush(stdout)
+        end
+        GC.gc()
+    end
 
     for step in 1:n_steps
-        if maxlinkdim(psi) < maxm
-            t = @elapsed begin
-                # psi = tdvp(H, psi, time_tau / n_steps;
-                #            nsweeps=1, nsite=2, cutoff=cutoff,
-                #            maxdim=maxm, normalize=normalize,
-                #            solver_backend=solver_backend, shift=shift)
-
-                psi = tdvp(H, time_tau / n_steps, psi;
-                    updater_backend=solver_backend,
-                    nsweeps=1,
-                    nsite=2,
-                    cutoff=cutoff,
-                    maxdim=maxm,
-                    normalize=false)
-
-                log_norm += 2.0*log(norm(psi))
-                normalize!(psi)
-            end
-
-            svn = entropy_von_neumann(psi, N ÷ 2)
-            linkdim = maxlinkdim(psi)
-            if !silent
-                @printf("    2TDVP sweep, tau: %.5f, SvN: %.4f, maxm: %6d, time: %.5f secs\n",
-                    tau, svn, linkdim, t)
-                flush(stdout)
-            end
-        else
-            t = @elapsed begin
-                # psi = tdvp(H, psi, time_tau / n_steps;
-                #            nsweeps=1, nsite=1, cutoff=cutoff,
-                #            maxdim=maxm, normalize=normalize,
-                #            solver_backend=solver_backend, shift=shift)
-                psi = tdvp(H, time_tau / n_steps, psi;
-                    updater_backend=solver_backend,
-                    nsweeps=1,
-                    nsite=1,
-                    cutoff=cutoff,
-                    maxdim=maxm,
-                    normalize=false)
-
-                log_norm += 2.0*log(norm(psi))
-                normalize!(psi)
-            end
-            svn = entropy_von_neumann(psi, N ÷ 2)
-            linkdim = maxlinkdim(psi)
-            if !silent
-                @printf("    1TDVP sweep, tau: %.5f, SvN: %.4f, maxm: %6d, time: %.5f secs\n",
-                    tau, svn, linkdim, t)
-                flush(stdout)
-            end
-        end
-
-
-        GC.gc()
-
+        offset + step <= done && continue
+        sweep(time_tau / n_steps, tau)
+        checkpoint_step!(tracker, offset + step, psi, log_norm)
     end
-    if !isapprox(remainder, 0; rtol=1e-6, atol=1e-6)
-        if maxlinkdim(psi) < maxm
-            t = @elapsed begin
-                # psi = tdvp(H, psi, remainder;
-                #            nsweeps=1, nsite=2, cutoff=cutoff,
-                #            maxdim=maxm, normalize=normalize,
-                #            solver_backend=solver_backend, shift=shift)
-
-                psi = tdvp(H, remainder, psi;
-                    updater_backend=solver_backend,
-                    nsweeps=1,
-                    nsite=2,
-                    cutoff=cutoff,
-                    maxdim=maxm,
-                    normalize=false)
-                
-                log_norm += 2.0*log(norm(psi))
-                normalize!(psi)
-            end
-            svn = entropy_von_neumann(psi, N ÷ 2)
-            linkdim = maxlinkdim(psi)
-            if !silent
-                @printf("    2TDVP sweep, tau: %.5f, SvN: %.4f, maxm: %6d, time: %.5f secs\n",
-                    abs(remainder), svn, linkdim, t)
-                flush(stdout)
-            end
-        else
-            t = @elapsed begin
-                # psi = tdvp(H, psi, remainder;
-                #            nsweeps=1, nsite=1, cutoff=cutoff,
-                #            maxdim=maxm, normalize=normalize,
-                #            solver_backend=solver_backend, shift=shift)
-
-                psi = tdvp(H, remainder, psi;
-                    updater_backend=solver_backend,
-                    nsweeps=1,
-                    nsite=1,
-                    cutoff=cutoff,
-                    maxdim=maxm,
-                    normalize=false)
-
-                log_norm += 2.0*log(norm(psi))
-                normalize!(psi)
-            end
-            svn = entropy_von_neumann(psi, N ÷ 2)
-            linkdim = maxlinkdim(psi)
-            if !silent
-                @printf("    1TDVP sweep, tau: %.5f, SvN: %.4f, maxm: %6d, time: %.5f secs\n",
-                    abs(remainder), svn, linkdim, t)
-                flush(stdout)
-            end
-        end
-
-        GC.gc()
+    if !isapprox(remainder, 0; rtol=1e-6, atol=1e-6) && offset + n_steps + 1 > done
+        sweep(remainder, abs(remainder))
+        checkpoint_step!(tracker, offset + n_steps + 1, psi, log_norm)
     end
 
     return psi, log_norm
@@ -162,6 +105,8 @@ Time evolution using TDVP with intitial basis extension
 starting out with 2TDVP until a maximal bond dimension is achieved
 then it switches to 1TDVP
 a commensurate step size is automatically chosen
+
+With `checkpoint` set, the evolution can be stopped and resumed (see `EvolutionCheckpoint`).
 """
 function timeevo_tdvp_extend(H::MPO, psi0::MPS, time::Number;
     tau::Number=0.1, cutoff::Float64=1e-6,
@@ -169,7 +114,7 @@ function timeevo_tdvp_extend(H::MPO, psi0::MPS, time::Number;
     nsubdiv::Int64=4, kkrylov::Int64=3,
     normalize::Bool=true, silent=false,
     solver_backend::AbstractString="applyexp",
-    shift::Real=0.)
+    shift::Real=0., checkpoint::Union{Nothing,EvolutionCheckpoint}=nothing)
 
     log_norm = 0.0
 
@@ -185,7 +130,17 @@ function timeevo_tdvp_extend(H::MPO, psi0::MPS, time::Number;
 
     psi = copy(psi0)
 
+    # Steps are numbered over the basis extension (1:nsubdiv) and the bulk evolution, so that
+    # a resumed run skips exactly the steps contained in the checkpoint
+    tracker = checkpoint_tracker(checkpoint)
+    done = 0
+    state = resume_checkpoint(tracker)
+    if !isnothing(state)
+        psi, log_norm, done = state.psi, state.log_norm, state.step
+    end
+
     for isub in 1:nsubdiv
+        isub <= done && continue
         l1 = maxlinkdim(psi)
         t = @elapsed begin
             println("    Performing basis extension ...")
@@ -210,7 +165,7 @@ function timeevo_tdvp_extend(H::MPO, psi0::MPS, time::Number;
                 cutoff=cutoff,
                 maxdim=maxm,
                 normalize=false)
-            
+
             log_norm += 2.0*log(norm(psi))
             normalize!(psi)
         end
@@ -222,16 +177,14 @@ function timeevo_tdvp_extend(H::MPO, psi0::MPS, time::Number;
                 abs(times_init[isub]), svn, linkdim, t)
             flush(stdout)
         end
+        checkpoint_step!(tracker, isub, psi, log_norm)
     end
     GC.gc()
 
     # Perform the bulk time evolution
     time_bulk = time - time_init
-    psi, norm_tmp = timeevo_tdvp(H, psi, time_bulk; tau=tau, cutoff=cutoff, maxm=maxm,
-        normalize=normalize, silent=silent,
-        solver_backend=solver_backend, shift=shift)
-
-    log_norm += norm_tmp
+    psi, log_norm = timeevo_tdvp_steps(H, psi, time_bulk, log_norm, nsubdiv, done, tracker;
+        tau=tau, cutoff=cutoff, maxm=maxm, silent=silent, solver_backend=solver_backend)
 
     return psi, log_norm
 end
